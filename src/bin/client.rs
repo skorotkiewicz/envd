@@ -49,7 +49,7 @@ fn resolve_project(projects: &HashMap<String, String>) -> anyhow::Result<String>
         let proj_path = PathBuf::from(&expanded);
         if cwd.starts_with(&proj_path) {
             let depth = proj_path.components().count();
-            if best.as_ref().map_or(true, |(d, _)| depth > *d) {
+            if best.as_ref().is_none_or(|(d, _)| depth > *d) {
                 best = Some((depth, name.clone()));
             }
         }

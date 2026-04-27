@@ -7,8 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use serde::Deserialize;
 
 // -- Config
 
@@ -21,7 +20,9 @@ struct ServerConfig {
 #[derive(Debug, Deserialize)]
 struct Config {
     bind: Option<String>,
-    db: String,
+    valkey: Option<String>,
+    postgres: Option<String>,
+    sqlite: Option<String>,
 }
 
 fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
@@ -29,11 +30,387 @@ fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
     Ok(serde_yaml::from_str(&text)?)
 }
 
+// -- Backend
+
+#[derive(Clone)]
+enum Db {
+    Valkey(redis::aio::MultiplexedConnection),
+    Postgres(sqlx::PgPool),
+    Sqlite(sqlx::SqlitePool),
+}
+
+impl Db {
+    async fn connect(cfg: &Config) -> anyhow::Result<Self> {
+        if let Some(url) = &cfg.valkey {
+            let client = redis::Client::open(url.as_str())?;
+            let conn = client.get_multiplexed_async_connection().await?;
+            println!("✓ valkey connected");
+            return Ok(Db::Valkey(conn));
+        }
+        if let Some(url) = &cfg.postgres {
+            let pool = sqlx::PgPool::connect(url).await?;
+            Self::migrate_pg(&pool).await?;
+            println!("✓ postgres connected");
+            return Ok(Db::Postgres(pool));
+        }
+        if let Some(path) = &cfg.sqlite {
+            // sqlx sqlite needs the file to exist; create it if missing
+            let file_path = path
+                .strip_prefix("sqlite://")
+                .or_else(|| path.strip_prefix("sqlite:"))
+                .unwrap_or(path);
+            if !std::path::Path::new(file_path).exists() {
+                std::fs::File::create(file_path)?;
+            }
+            let pool = sqlx::SqlitePool::connect(path).await?;
+            Self::migrate_sqlite(&pool).await?;
+            println!("✓ sqlite connected ({file_path})");
+            return Ok(Db::Sqlite(pool));
+        }
+        anyhow::bail!("no database configured. set 'valkey', 'postgres', or 'sqlite' in server.yml")
+    }
+
+    // -- Valkey helpers --
+
+    async fn v_projects(&mut self) -> anyhow::Result<Vec<String>> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        Ok(c.smembers("envd:projects").await.unwrap_or_default())
+    }
+
+    async fn v_create_project(&mut self, name: &str) -> anyhow::Result<()> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        let _: i64 = c.sadd("envd:projects", name).await?;
+        Ok(())
+    }
+
+    async fn v_delete_project(&mut self, name: &str) -> anyhow::Result<()> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        let _: i64 = c.srem("envd:projects", name).await?;
+        let _: i64 = c.del(format!("envd:envs:{name}")).await?;
+        Ok(())
+    }
+
+    async fn v_get_envs(&mut self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        Ok(c.hgetall(format!("envd:envs:{name}"))
+            .await
+            .unwrap_or_default())
+    }
+
+    async fn v_set_envs(
+        &mut self,
+        name: &str,
+        envs: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        let _: i64 = c.sadd("envd:projects", name).await?;
+        for (k, v) in envs {
+            let _: i64 = c.hset(format!("envd:envs:{name}"), k, v).await?;
+        }
+        Ok(())
+    }
+
+    async fn v_delete_env(&mut self, name: &str, key: &str) -> anyhow::Result<()> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        let _: i64 = c.hdel(format!("envd:envs:{name}"), key).await?;
+        Ok(())
+    }
+
+    // -- Postgres helpers --
+
+    async fn migrate_pg(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS projects (
+                id      SERIAL PRIMARY KEY,
+                name    TEXT UNIQUE NOT NULL,
+                created TIMESTAMPTZ DEFAULT now()
+            )",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS envs (
+                id      SERIAL PRIMARY KEY,
+                project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+                key     TEXT NOT NULL,
+                value   TEXT NOT NULL,
+                updated TIMESTAMPTZ DEFAULT now(),
+                UNIQUE(project, key)
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn pg_projects(&self) -> anyhow::Result<Vec<String>> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<String> = sqlx::query_scalar("SELECT name FROM projects ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn pg_create_project(&self, name: &str) -> anyhow::Result<()> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(name)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn pg_delete_project(&self, name: &str) -> anyhow::Result<()> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM projects WHERE name = $1")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    async fn pg_get_envs(&self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM envs WHERE project = $1 ORDER BY key")
+                .bind(name)
+                .fetch_all(pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn pg_set_envs(&self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        for (k, v) in envs {
+            sqlx::query(
+                "INSERT INTO envs (project, key, value) VALUES ($1,$2,$3)
+                 ON CONFLICT (project, key) DO UPDATE SET value = $3, updated = now()",
+            )
+            .bind(name)
+            .bind(k)
+            .bind(v)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn pg_delete_env(&self, name: &str, key: &str) -> anyhow::Result<()> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND key = $2")
+            .bind(name)
+            .bind(key)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    // -- SQLite helpers --
+
+    async fn migrate_sqlite(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS projects (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                name    TEXT UNIQUE NOT NULL,
+                created TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS envs (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+                key     TEXT NOT NULL,
+                value   TEXT NOT NULL,
+                updated TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(project, key)
+            )",
+        )
+        .execute(pool)
+        .await?;
+
+        // enable foreign keys
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn sq_projects(&self) -> anyhow::Result<Vec<String>> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<String> = sqlx::query_scalar("SELECT name FROM projects ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn sq_create_project(&self, name: &str) -> anyhow::Result<()> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(name)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn sq_delete_project(&self, name: &str) -> anyhow::Result<()> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM projects WHERE name = $1")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    async fn sq_get_envs(&self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM envs WHERE project = $1 ORDER BY key")
+                .bind(name)
+                .fetch_all(pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    async fn sq_set_envs(&self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(name)
+            .execute(pool)
+            .await
+            .ok();
+        for (k, v) in envs {
+            sqlx::query(
+                "INSERT INTO envs (project, key, value) VALUES ($1,$2,$3)
+                 ON CONFLICT (project, key) DO UPDATE SET value = $3, updated = CURRENT_TIMESTAMP",
+            )
+            .bind(name)
+            .bind(k)
+            .bind(v)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn sq_delete_env(&self, name: &str, key: &str) -> anyhow::Result<()> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND key = $2")
+            .bind(name)
+            .bind(key)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    // -- Dispatch --
+
+    async fn list_projects(&mut self) -> anyhow::Result<Vec<String>> {
+        match self {
+            Db::Valkey(..) => self.v_projects().await,
+            Db::Postgres(..) => self.pg_projects().await,
+            Db::Sqlite(..) => self.sq_projects().await,
+        }
+    }
+
+    async fn create_project(&mut self, name: &str) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_create_project(name).await,
+            Db::Postgres(..) => self.pg_create_project(name).await,
+            Db::Sqlite(..) => self.sq_create_project(name).await,
+        }
+    }
+
+    async fn delete_project(&mut self, name: &str) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_delete_project(name).await,
+            Db::Postgres(..) => self.pg_delete_project(name).await,
+            Db::Sqlite(..) => self.sq_delete_project(name).await,
+        }
+    }
+
+    async fn get_envs(&mut self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+        match self {
+            Db::Valkey(..) => self.v_get_envs(name).await,
+            Db::Postgres(..) => self.pg_get_envs(name).await,
+            Db::Sqlite(..) => self.sq_get_envs(name).await,
+        }
+    }
+
+    async fn set_envs(&mut self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_set_envs(name, envs).await,
+            Db::Postgres(..) => self.pg_set_envs(name, envs).await,
+            Db::Sqlite(..) => self.sq_set_envs(name, envs).await,
+        }
+    }
+
+    async fn delete_env(&mut self, name: &str, key: &str) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_delete_env(name, key).await,
+            Db::Postgres(..) => self.pg_delete_env(name, key).await,
+            Db::Sqlite(..) => self.sq_delete_env(name, key).await,
+        }
+    }
+}
+
 // -- State
 
 #[derive(Clone)]
 struct AppState {
-    db: PgPool,
+    db: Db,
     users: Arc<HashMap<String, String>>,
 }
 
@@ -57,12 +434,6 @@ macro_rules! require_auth {
 
 // -- Models
 
-#[derive(Serialize, sqlx::FromRow)]
-struct EnvRow {
-    key: String,
-    value: String,
-}
-
 #[derive(Deserialize)]
 struct SetEnvsBody {
     envs: HashMap<String, String>,
@@ -71,18 +442,17 @@ struct SetEnvsBody {
 // -- Handlers
 
 /// GET /projects
-async fn list_projects(State(s): State<AppState>, headers: HeaderMap) -> Response {
+async fn list_projects(State(mut s): State<AppState>, headers: HeaderMap) -> Response {
     require_auth!(s, headers);
-    let rows: Vec<String> = sqlx::query_scalar("SELECT name FROM projects ORDER BY name")
-        .fetch_all(&s.db)
-        .await
-        .unwrap_or_default();
-    Json(rows).into_response()
+    match s.db.list_projects().await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// POST /projects  body: { "name": "myapp" }
 async fn create_project(
-    State(s): State<AppState>,
+    State(mut s): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
@@ -91,138 +461,67 @@ async fn create_project(
         Some(n) => n.to_string(),
         None => return (StatusCode::BAD_REQUEST, "missing name").into_response(),
     };
-    match sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
-        .bind(&name)
-        .execute(&s.db)
-        .await
-    {
+    match s.db.create_project(&name).await {
         Ok(_) => (StatusCode::CREATED, name).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-/// DELETE /projects/:name
+/// DELETE /projects/{name}
 async fn delete_project(
-    State(s): State<AppState>,
+    State(mut s): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
     require_auth!(s, headers);
-    sqlx::query("DELETE FROM envs WHERE project = $1")
-        .bind(&name)
-        .execute(&s.db)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM projects WHERE name = $1")
-        .bind(&name)
-        .execute(&s.db)
-        .await
-        .ok();
+    s.db.delete_project(&name).await.ok();
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// GET /projects/:name/envs  -> YAML
+/// GET /projects/{name}/envs  -> YAML
 async fn get_envs(
-    State(s): State<AppState>,
+    State(mut s): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
     require_auth!(s, headers);
-    let rows: Vec<EnvRow> =
-        sqlx::query_as("SELECT key, value FROM envs WHERE project = $1 ORDER BY key")
-            .bind(&name)
-            .fetch_all(&s.db)
-            .await
-            .unwrap_or_default();
-
-    let map: HashMap<String, String> = rows.into_iter().map(|r| (r.key, r.value)).collect();
-    let yaml = serde_yaml::to_string(&map).unwrap_or_default();
-    (StatusCode::OK, [("content-type", "application/yaml")], yaml).into_response()
+    match s.db.get_envs(&name).await {
+        Ok(envs) => {
+            let yaml = serde_yaml::to_string(&envs).unwrap_or_default();
+            (StatusCode::OK, [("content-type", "application/yaml")], yaml).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
-/// POST /projects/:name/envs  body: { "envs": { "KEY": "val", ... } }
+/// POST /projects/{name}/envs  body: { "envs": { "KEY": "val", ... } }
 async fn set_envs(
-    State(s): State<AppState>,
+    State(mut s): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
     Json(body): Json<SetEnvsBody>,
 ) -> Response {
     require_auth!(s, headers);
-
-    // ensure project exists
-    sqlx::query("INSERT INTO projects (name) VALUES ($1) ON CONFLICT DO NOTHING")
-        .bind(&name)
-        .execute(&s.db)
-        .await
-        .ok();
-
-    for (key, value) in &body.envs {
-        let res = sqlx::query(
-            "INSERT INTO envs (project, key, value) VALUES ($1, $2, $3)
-             ON CONFLICT (project, key) DO UPDATE SET value = $3, updated = now()",
-        )
-        .bind(&name)
-        .bind(key)
-        .bind(value)
-        .execute(&s.db)
-        .await;
-
-        if let Err(e) = res {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
+    match s.db.set_envs(&name, &body.envs).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
-
-    StatusCode::NO_CONTENT.into_response()
 }
 
-/// DELETE /projects/:name/envs/:key
+/// DELETE /projects/{name}/envs/{key}
 async fn delete_env(
-    State(s): State<AppState>,
+    State(mut s): State<AppState>,
     headers: HeaderMap,
     Path((name, key)): Path<(String, String)>,
 ) -> Response {
     require_auth!(s, headers);
-    sqlx::query("DELETE FROM envs WHERE project = $1 AND key = $2")
-        .bind(&name)
-        .bind(&key)
-        .execute(&s.db)
-        .await
-        .ok();
+    s.db.delete_env(&name, &key).await.ok();
     StatusCode::NO_CONTENT.into_response()
 }
 
 /// GET /health
 async fn health() -> &'static str {
     "ok"
-}
-
-// -- Migrations
-
-async fn migrate(db: &PgPool) -> anyhow::Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS projects (
-            id      SERIAL PRIMARY KEY,
-            name    TEXT UNIQUE NOT NULL,
-            created TIMESTAMPTZ DEFAULT now()
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS envs (
-            id      SERIAL PRIMARY KEY,
-            project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-            key     TEXT NOT NULL,
-            value   TEXT NOT NULL,
-            updated TIMESTAMPTZ DEFAULT now(),
-            UNIQUE(project, key)
-        )",
-    )
-    .execute(db)
-    .await?;
-
-    Ok(())
 }
 
 // -- Main
@@ -234,9 +533,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = cfg.config.bind.as_deref().unwrap_or("0.0.0.0:7878");
 
-    let db = PgPool::connect(&cfg.config.db).await?;
-    migrate(&db).await?;
-    println!("✓ db connected");
+    let db = Db::connect(&cfg.config).await?;
 
     let state = AppState {
         db,
@@ -246,9 +543,9 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/:name", delete(delete_project))
-        .route("/projects/:name/envs", get(get_envs).post(set_envs))
-        .route("/projects/:name/envs/:key", delete(delete_env))
+        .route("/projects/{name}", delete(delete_project))
+        .route("/projects/{name}/envs", get(get_envs).post(set_envs))
+        .route("/projects/{name}/envs/{key}", delete(delete_env))
         .with_state(state);
 
     println!("✓ envd listening on {bind}");
