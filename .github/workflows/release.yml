@@ -43,6 +43,7 @@ jobs:
           cp ../target/${{ matrix.target }}/release/envd envd
           cp ../target/${{ matrix.target }}/release/enve enve
           cp ../README.md README.md
+          cp ../LICENSE LICENSE
           cp ../server.yml.example server.yml.example
           cp ../client.yml.example client.yml.example
           tar czf ../envd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz *
@@ -54,6 +55,7 @@ jobs:
           copy target\${{ matrix.target }}\release\envd.exe dist\envd.exe
           copy target\${{ matrix.target }}\release\enve.exe dist\enve.exe
           copy README.md dist\README.md
+          copy LICENSE dist\LICENSE
           copy server.yml.example dist\server.yml.example
           copy client.yml.example dist\client.yml.example
           cd dist && 7z a ..\envd-${{ github.ref_name }}-${{ matrix.target }}.zip *
