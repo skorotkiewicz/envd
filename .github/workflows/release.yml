@@ -42,6 +42,9 @@ jobs:
           mkdir dist && cd dist
           cp ../target/${{ matrix.target }}/release/envd envd
           cp ../target/${{ matrix.target }}/release/enve enve
+          cp ../README.md README.md
+          cp ../server.yml.example server.yml.example
+          cp ../client.yml.example client.yml.example
           tar czf ../envd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz *
 
       - name: Package (Windows)
@@ -50,6 +53,9 @@ jobs:
           mkdir dist
           copy target\${{ matrix.target }}\release\envd.exe dist\envd.exe
           copy target\${{ matrix.target }}\release\enve.exe dist\enve.exe
+          copy README.md dist\README.md
+          copy server.yml.example dist\server.yml.example
+          copy client.yml.example dist\client.yml.example
           cd dist && 7z a ..\envd-${{ github.ref_name }}-${{ matrix.target }}.zip *
 
       - uses: actions/upload-artifact@v4
@@ -99,38 +105,38 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
 
-  # aur-publish:
-  #   name: Publish to AUR
-  #   needs: release
-  #   if: startsWith(github.ref, 'refs/tags/')
-  #   runs-on: ubuntu-latest
-  #   container:
-  #     image: archlinux:base-devel
+  aur-publish:
+    name: Publish to AUR
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
 
-  #   steps:
-  #     - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Install dependencies
-  #       run: |
-  #         pacman -Syu --noconfirm
-  #         pacman -S --noconfirm git openssh pacman-contrib
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm git openssh pacman-contrib
 
-  #     - name: Update PKGBUILD and generate .SRCINFO
-  #       run: |
-  #         VERSION=${GITHUB_REF#refs/tags/v}
-  #         sed -i "s/^pkgver=.*/pkgver=$VERSION/" arch/PKGBUILD
-  #         sed -i 's/^pkgrel=.*/pkgrel=1/' arch/PKGBUILD
-  #         cd arch && updpkgsums && makepkg --printsrcinfo > .SRCINFO
+      - name: Update PKGBUILD and generate .SRCINFO
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" arch/PKGBUILD
+          sed -i 's/^pkgrel=.*/pkgrel=1/' arch/PKGBUILD
+          cd arch && updpkgsums && makepkg --printsrcinfo > .SRCINFO
 
-  #     - name: Publish AUR package
-  #       uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
-  #       with:
-  #         pkgname: envd
-  #         pkgbuild: ./arch/PKGBUILD
-  #         assets: |
-  #           ./arch/.SRCINFO
-  #         commit_username: ${{ secrets.AUR_USERNAME }}
-  #         commit_email: ${{ secrets.AUR_EMAIL }}
-  #         ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-  #         commit_message: "aur: ${{ github.ref_name }}"
-  #         ssh_keyscan_types: rsa,ecdsa,ed25519
+      - name: Publish AUR package
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        with:
+          pkgname: envd
+          pkgbuild: ./arch/PKGBUILD
+          assets: |
+            ./arch/.SRCINFO
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "aur: ${{ github.ref_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519

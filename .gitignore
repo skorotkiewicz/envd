@@ -2,3 +2,4 @@ target/
 dev/
 data/
 test/*.db
+*.tar.gz

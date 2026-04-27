@@ -1,0 +1,15 @@
+pkgbase = envd
+	pkgdesc = Tiny server that stores per-project environment variables
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/skorotkiewicz/envd
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	depends = gcc-libs
+	source_x86_64 = envd-0.1.0-x86_64.tar.gz::https://github.com/skorotkiewicz/envd/releases/download/v0.1.0/envd-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums_x86_64 = f24e62c67a6ebe5430d727102225cfd477bf1e3597b92bd05a245aac43c97d8e
+	source_aarch64 = envd-0.1.0-aarch64.tar.gz::https://github.com/skorotkiewicz/envd/releases/download/v0.1.0/envd-v0.1.0-aarch64-unknown-linux-gnu.tar.gz
+	sha256sums_aarch64 = f15fc24eaef92255c4b2da5a2efd606c19c827ff5f331a1bed52ec73288e0f30
+
+pkgname = envd
