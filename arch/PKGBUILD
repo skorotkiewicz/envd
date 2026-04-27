@@ -7,7 +7,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/skorotkiewicz/envd"
 license=('MIT')
 depends=('gcc-libs')
-makedepends=()
+options=(!strip)
 
 source_x86_64=("$pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/envd-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("$pkgname-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/envd-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
