@@ -1,0 +1,9 @@
+config:
+  bind:     0.0.0.0:7878
+  backend:  valkey          # valkey | postgres | sqlite
+  auth:     secret_token    # shared API key
+
+storage:
+  valkey:   redis://localhost:6379
+  # postgres: postgresql://user:pass@localhost:5432/envd
+  # sqlite:   "envd.db"

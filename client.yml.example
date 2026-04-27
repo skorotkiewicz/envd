@@ -1,0 +1,7 @@
+config:
+  endpoint: http://localhost:7878
+  token:    secret_token
+
+projects:
+  myapp:   ~/Dev/myapp/
+  backend: ~/Dev/backend/
