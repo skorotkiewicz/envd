@@ -83,7 +83,7 @@ fn client(cfg: &Config) -> reqwest::blocking::Client {
 // -- CLI
 
 #[derive(Parser)]
-#[command(name = "env", about = "Manage project envs via envd")]
+#[command(name = "env", about = "Manage project envs via envd", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

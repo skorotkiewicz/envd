@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
+use clap::Parser;
 use serde::Deserialize;
 
 // -- Config
@@ -545,9 +546,17 @@ async fn health() -> &'static str {
 
 // -- Main
 
+#[derive(Parser)]
+#[command(name = "envd", about = "Environment variable daemon", version)]
+struct Args {
+    /// Path to config file
+    config: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config_path = std::env::args().nth(1).unwrap_or("server.yml".into());
+    let args = Args::parse();
+    let config_path = args.config.unwrap_or_else(|| "server.yml".into());
     let cfg = load_config(&config_path)?;
 
     let bind = cfg.config.bind.as_deref().unwrap_or("0.0.0.0:7878");
