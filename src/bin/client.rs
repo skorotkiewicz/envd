@@ -257,17 +257,15 @@ fn main() -> anyhow::Result<()> {
                     r#"
 # envd shell hook
 _envd_hook() {{
-  local project
-  project=$(env get --project "" 2>/dev/null) || return
   while IFS='=' read -r key val; do
     export "$key=$val"
-  done < <(env get 2>/dev/null)
+  done < <(enve get 2>/dev/null)
 }}
 if [[ -n "$ZSH_VERSION" ]]; then
   autoload -U add-zsh-hook
   add-zsh-hook chpwd _envd_hook
 else
-  PROMPT_COMMAND="_envd_hook;${{PROMPT_COMMAND}}"
+  PROMPT_COMMAND="_envd_hook;$PROMPT_COMMAND"
 fi
 _envd_hook
 "#

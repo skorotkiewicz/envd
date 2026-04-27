@@ -10,17 +10,17 @@ docker compose up -d          # starts valkey (or use your own)
 cargo run --bin envd server.yml
 
 # configure the client
-env project add myapp ~/Dev/myapp/
+enve project add myapp ~/Dev/myapp/
 
 # daily use — project auto-detected from cwd
-env set DATABASE_URL=postgres://localhost/myapp
-env set API_KEY=secret
-env get                       # prints all envs
-env run cargo run             # runs with envs injected
+enve set DATABASE_URL=postgres://localhost/myapp
+enve set API_KEY=secret
+enve get                       # prints all envs
+enve run cargo run             # runs with envs injected
 
 # override project explicitly
-env get --project myapp       # from anywhere, not just ~/Dev/myapp/
-env set DEBUG=true --project backend
+enve get --project myapp       # from anywhere, not just ~/Dev/myapp/
+enve set DEBUG=true --project backend
 ```
 
 ## Server config (`server.yml`)
@@ -60,11 +60,11 @@ Project is auto-detected from `cwd` (deepest prefix match).
 
 | Command | Description |
 |---|---|
-| `env project add NAME PATH` | register project |
-| `env set KEY=val [KEY2=val2]` | set env(s) |
-| `env get [KEY]` | get all or one env |
-| `env rm KEY` | delete one env |
-| `env run <cmd>` | run command with envs injected |
+| `enve project add NAME PATH` | register project |
+| `enve set KEY=val [KEY2=val2]` | set env(s) |
+| `enve get [KEY]` | get all or one env |
+| `enve rm KEY` | delete one env |
+| `enve run <cmd>` | run command with envs injected |
 
 Override project: `--project myapp`
 

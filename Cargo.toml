@@ -8,7 +8,7 @@ name = "envd"
 path = "src/bin/server.rs"
 
 [[bin]]
-name = "env"
+name = "enve"
 path = "src/bin/client.rs"
 
 [dependencies]

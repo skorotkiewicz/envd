@@ -32,7 +32,7 @@ config:
 projects:
   myapp:   /home/mod/Dev/Rust/envd/
 EOF
-./target/debug/env get --project myapp
+./target/debug/enve get --project myapp
 # Cleanup
 kill $ENV_PID 2>/dev/null
 wait $ENV_PID 2>/dev/null
