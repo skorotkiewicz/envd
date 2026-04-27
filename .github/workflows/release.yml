@@ -91,6 +91,7 @@ jobs:
         with:
           path: artifacts
           pattern: envd-*
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

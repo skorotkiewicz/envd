@@ -64,7 +64,7 @@ Project is auto-detected from `cwd` (deepest prefix match).
 | `enve set KEY=val [KEY2=val2]` | set env(s) |
 | `enve get [KEY]` | get all or one env |
 | `enve rm KEY` | delete one env |
-| `enve run <cmd>` | run command with envs injected |
+| `enve run -- <cmd>` | run command with envs injected |
 
 Override project: `--project myapp`
 
