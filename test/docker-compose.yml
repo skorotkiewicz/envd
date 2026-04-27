@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres-envd
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: envd
+      POSTGRES_PASSWORD: envd
+      POSTGRES_DB: envd
+
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      # - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U envd -d envd"]
+      interval: 25s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.0.3
+    container_name: valkey-envd
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/valkey:/data
+      # - valkey_data:/data
+    command: >
+      valkey-server
+      --appendonly yes
+      --save 60 1
+    restart: unless-stopped
+
+# volumes:
+  # valkey_data:
+  # postgres_data:

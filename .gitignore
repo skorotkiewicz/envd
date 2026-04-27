@@ -1,3 +1,4 @@
 target/
 dev/
 data/
+test/*.db

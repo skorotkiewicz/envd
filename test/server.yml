@@ -1,0 +1,9 @@
+config:
+  bind:     0.0.0.0:7878
+  backend:  postgres
+  auth:     qwqw
+
+storage:
+  valkey:   redis://localhost:6379
+  postgres: postgresql://envd:envd@localhost:5432/envd
+  sqlite:   "test/envd.db"
