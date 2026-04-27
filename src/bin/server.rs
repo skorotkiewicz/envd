@@ -20,6 +20,7 @@ struct ServerConfig {
 #[derive(Debug, Deserialize)]
 struct Config {
     bind: Option<String>,
+    backend: String,
     valkey: Option<String>,
     postgres: Option<String>,
     sqlite: Option<String>,
@@ -41,33 +42,41 @@ enum Db {
 
 impl Db {
     async fn connect(cfg: &Config) -> anyhow::Result<Self> {
-        if let Some(url) = &cfg.valkey {
-            let client = redis::Client::open(url.as_str())?;
-            let conn = client.get_multiplexed_async_connection().await?;
-            println!("✓ valkey connected");
-            return Ok(Db::Valkey(conn));
-        }
-        if let Some(url) = &cfg.postgres {
-            let pool = sqlx::PgPool::connect(url).await?;
-            Self::migrate_pg(&pool).await?;
-            println!("✓ postgres connected");
-            return Ok(Db::Postgres(pool));
-        }
-        if let Some(path) = &cfg.sqlite {
-            // sqlx sqlite needs the file to exist; create it if missing
-            let file_path = path
-                .strip_prefix("sqlite://")
-                .or_else(|| path.strip_prefix("sqlite:"))
-                .unwrap_or(path);
-            if !std::path::Path::new(file_path).exists() {
-                std::fs::File::create(file_path)?;
+        match cfg.backend.as_str() {
+            "valkey" => {
+                let url = cfg.valkey.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("backend is 'valkey' but no 'valkey:' URL configured"))?;
+                let client = redis::Client::open(url.as_str())?;
+                let conn = client.get_multiplexed_async_connection().await?;
+                println!("✓ valkey connected");
+                Ok(Db::Valkey(conn))
             }
-            let pool = sqlx::SqlitePool::connect(path).await?;
-            Self::migrate_sqlite(&pool).await?;
-            println!("✓ sqlite connected ({file_path})");
-            return Ok(Db::Sqlite(pool));
+            "postgres" => {
+                let url = cfg.postgres.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("backend is 'postgres' but no 'postgres:' URL configured"))?;
+                let pool = sqlx::PgPool::connect(url).await?;
+                Self::migrate_pg(&pool).await?;
+                println!("✓ postgres connected");
+                Ok(Db::Postgres(pool))
+            }
+            "sqlite" => {
+                let path = cfg.sqlite.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("backend is 'sqlite' but no 'sqlite:' path configured"))?;
+                // sqlx sqlite needs the file to exist; create it if missing
+                let file_path = path
+                    .strip_prefix("sqlite://")
+                    .or_else(|| path.strip_prefix("sqlite:"))
+                    .unwrap_or(path);
+                if !std::path::Path::new(file_path).exists() {
+                    std::fs::File::create(file_path)?;
+                }
+                let pool = sqlx::SqlitePool::connect(path).await?;
+                Self::migrate_sqlite(&pool).await?;
+                println!("✓ sqlite connected ({file_path})");
+                Ok(Db::Sqlite(pool))
+            }
+            other => anyhow::bail!("unknown backend '{other}'. use 'valkey', 'postgres', or 'sqlite'")
         }
-        anyhow::bail!("no database configured. set 'valkey', 'postgres', or 'sqlite' in server.yml")
     }
 
     // -- Valkey helpers --
