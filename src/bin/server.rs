@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, sync::Arc};
+use std::{collections::HashMap, fs};
 
 use axum::{
     Json, Router,
@@ -14,13 +14,18 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct ServerConfig {
     config: Config,
-    users: HashMap<String, String>,
+    storage: Storage,
 }
 
 #[derive(Debug, Deserialize)]
 struct Config {
     bind: Option<String>,
     backend: String,
+    auth: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Storage {
     valkey: Option<String>,
     postgres: Option<String>,
     sqlite: Option<String>,
@@ -41,27 +46,30 @@ enum Db {
 }
 
 impl Db {
-    async fn connect(cfg: &Config) -> anyhow::Result<Self> {
-        match cfg.backend.as_str() {
+    async fn connect(backend: &str, storage: &Storage) -> anyhow::Result<Self> {
+        match backend {
             "valkey" => {
-                let url = cfg.valkey.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("backend is 'valkey' but no 'valkey:' URL configured"))?;
+                let url = storage.valkey.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("backend is 'valkey' but no 'valkey:' URL configured")
+                })?;
                 let client = redis::Client::open(url.as_str())?;
                 let conn = client.get_multiplexed_async_connection().await?;
                 println!("✓ valkey connected");
                 Ok(Db::Valkey(conn))
             }
             "postgres" => {
-                let url = cfg.postgres.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("backend is 'postgres' but no 'postgres:' URL configured"))?;
+                let url = storage.postgres.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("backend is 'postgres' but no 'postgres:' URL configured")
+                })?;
                 let pool = sqlx::PgPool::connect(url).await?;
                 Self::migrate_pg(&pool).await?;
                 println!("✓ postgres connected");
                 Ok(Db::Postgres(pool))
             }
             "sqlite" => {
-                let path = cfg.sqlite.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("backend is 'sqlite' but no 'sqlite:' path configured"))?;
+                let path = storage.sqlite.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("backend is 'sqlite' but no 'sqlite:' path configured")
+                })?;
                 // sqlx sqlite needs the file to exist; create it if missing
                 let file_path = path
                     .strip_prefix("sqlite://")
@@ -75,7 +83,9 @@ impl Db {
                 println!("✓ sqlite connected ({file_path})");
                 Ok(Db::Sqlite(pool))
             }
-            other => anyhow::bail!("unknown backend '{other}'. use 'valkey', 'postgres', or 'sqlite'")
+            other => {
+                anyhow::bail!("unknown backend '{other}'. use 'valkey', 'postgres', or 'sqlite'")
+            }
         }
     }
 
@@ -420,7 +430,7 @@ impl Db {
 #[derive(Clone)]
 struct AppState {
     db: Db,
-    users: Arc<HashMap<String, String>>,
+    auth: String,
 }
 
 // -- Auth
@@ -429,7 +439,7 @@ fn auth(state: &AppState, headers: &HeaderMap) -> bool {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .map(|t| state.users.values().any(|v| v == t))
+        .map(|t| t == state.auth)
         .unwrap_or(false)
 }
 
@@ -542,11 +552,11 @@ async fn main() -> anyhow::Result<()> {
 
     let bind = cfg.config.bind.as_deref().unwrap_or("0.0.0.0:7878");
 
-    let db = Db::connect(&cfg.config).await?;
+    let db = Db::connect(&cfg.config.backend, &cfg.storage).await?;
 
     let state = AppState {
         db,
-        users: Arc::new(cfg.users),
+        auth: cfg.config.auth,
     };
 
     let app = Router::new()
