@@ -1,84 +1,113 @@
 # envd
 
-A tiny server that stores per-project environment variables. A CLI client reads and writes them.
+Store per-project environment variables in one place. Share them across machines. Auto-load them when you `cd` into a project.
 
-## Installation
+## Install
 
-**Arch Linux (AUR):**
 ```bash
+# Arch Linux
 yay -S envd
-```
 
-**From source:**
-```bash
+# From source
 cargo install --path .
 ```
 
-## Quick start
+## First time
+
+**1. Start the server**
 
 ```bash
-# start the server
-docker compose up -d          # starts valkey (or use your own)
-envd server.yml
-
-# configure the client
-enve project add myapp ~/Dev/myapp/
-
-# daily use — project auto-detected from cwd
-enve set DATABASE_URL=postgres://localhost/myapp
-enve set API_KEY=secret
-enve get                       # prints all envs
-enve run cargo run             # runs with envs injected
-
-# override project explicitly
-enve get --project myapp       # from anywhere, not just ~/Dev/myapp/
-enve set DEBUG=true --project backend
+docker compose up -d   # starts valkey (or use your own redis/valkey)
 ```
 
-## Server config (`server.yml`)
+Create `server.yml`:
 
 ```yaml
 config:
   bind:     0.0.0.0:7878
-  backend:  valkey          # valkey | postgres | sqlite
-  auth:     secret_token    # shared API key
+  backend:  valkey
+  auth:     change-me
 
 storage:
-  valkey:   redis://localhost:6379
+  valkey: redis://localhost:6379
   # postgres: postgresql://user:pass@localhost/envd
   # sqlite:   "envd.db"
 ```
 
-Pick one backend:
-- **valkey** — fast, in-memory, optional persistence
-- **postgres** — durable, team-friendly
-- **sqlite** — zero setup, file-based
+```bash
+envd server.yml
+```
 
-## Client config (`~/.config/envd/client.yml`)
+**2. Configure the client**
+
+Create `~/.config/envd/client.yml`:
 
 ```yaml
 config:
   endpoint: http://localhost:7878
-  token:    secret_token
-
-projects:
-  myapp:   ~/Dev/myapp/
-  backend: ~/Dev/backend/
+  token:    change-me
 ```
 
-Project is auto-detected from `cwd` (deepest prefix match).
+**3. Register your project**
+
+```bash
+cd ~/Dev/myapp
+enve project add myapp .
+```
+
+**4. Save some envs**
+
+```bash
+enve set DATABASE_URL=postgres://localhost/myapp
+enve set API_KEY=secret
+```
+
+## Daily use
+
+```bash
+cd ~/Dev/myapp          # project auto-detected
+enve get                # see all envs
+enve set DEBUG=true     # add/update one
+enve run -- cargo run   # run anything with envs injected
+```
+
+From another directory:
+
+```bash
+enve get API_KEY=secret --project myapp
+```
+
+## Shell hook (optional)
+
+Add to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+eval "$(enve hook zsh)"
+```
+
+Now `cd ~/Dev/myapp` automatically exports envs — `cargo run`, `bun test.js`, etc. just work.
+
+## Backends
+
+Pick one in `server.yml`:
+
+| Backend | Config | Use case |
+|---|---|---|
+| **Valkey** | `valkey: redis://localhost:6379` | Fast, shared cache |
+| **PostgreSQL** | `postgres: postgresql://user:pass@localhost/envd` | Durable, team-friendly |
+| **SQLite** | `sqlite: "envd.db"` | Zero setup, file-based |
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `enve project add NAME PATH` | register project |
-| `enve set KEY=val [KEY2=val2]` | set env(s) |
-| `enve get [KEY]` | get all or one env |
-| `enve rm KEY` | delete one env |
-| `enve run -- <cmd>` | run command with envs injected |
-
-Override project: `--project myapp`
+| `enve project add NAME PATH` | Register a project |
+| `enve project list` | Show registered projects |
+| `enve project rm NAME` | Remove a project |
+| `enve set KEY=val` | Save one or more envs |
+| `enve get [KEY]` | Show all envs (or one) |
+| `enve rm KEY` | Delete an env |
+| `enve run -- <cmd>` | Run command with envs injected |
 
 ## License
 
