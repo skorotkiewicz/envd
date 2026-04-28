@@ -270,19 +270,19 @@ _envd_hook() {{
   new_env=$(enve get 2>/dev/null)
 
   # Unset previously set variables
-  if [[ -n "${{_ENVD_KEYS:-}}" ]]; then
-    for key in ${{_ENVD_KEYS}}; do
+  if (( ${{#_ENVD_KEYS[@]}} > 0 )); then
+    for key in "${{_ENVD_KEYS[@]}}"; do
       unset "$key"
     done
   fi
 
-  _ENVD_KEYS=""
+  _ENVD_KEYS=()
 
   # Set new variables and track their keys
   while IFS='=' read -r key val; do
     if [[ -n "$key" ]]; then
       export "$key=$val"
-      _ENVD_KEYS="${{_ENVD_KEYS:+${{_ENVD_KEYS}} }}$key"
+      _ENVD_KEYS+=("$key")
     fi
   done <<< "$new_env"
 }}
