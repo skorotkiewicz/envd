@@ -97,6 +97,14 @@ Pick one in `server.yml`:
 | **PostgreSQL** | `postgres: postgresql://user:pass@localhost/envd` | Durable, team-friendly |
 | **SQLite** | `sqlite: "envd.db"` | Zero setup, file-based |
 
+## Shell completions (optional)
+
+Add to `~/.bashrc` / `~/.zshrc` / `~/.config/fish/config.fish`:
+
+```bash
+eval "$(enve complete bash)"   # or: zsh, fish | source
+```
+
 ## Commands
 
 | Command | Description |

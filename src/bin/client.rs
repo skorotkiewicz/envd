@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, fs, path::PathBuf, process::Command};
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 // -- Config
@@ -133,6 +133,9 @@ enum Cmd {
 
     /// Print shell hook (add `eval "$(enve hook zsh)"` to .zshrc)
     Hook { shell: String },
+
+    /// Generate shell completion script (bash, zsh, fish, elvish, powershell)
+    Complete { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +301,12 @@ _envd_hook
             }
             _ => eprintln!("supported shells: zsh, bash"),
         },
+
+        // -- complete
+        Cmd::Complete { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "enve", &mut std::io::stdout());
+        }
     }
 
     Ok(())
