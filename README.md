@@ -2,12 +2,24 @@
 
 A tiny server that stores per-project environment variables. A CLI client reads and writes them.
 
+## Installation
+
+**Arch Linux (AUR):**
+```bash
+yay -S envd
+```
+
+**From source:**
+```bash
+cargo install --path .
+```
+
 ## Quick start
 
 ```bash
 # start the server
 docker compose up -d          # starts valkey (or use your own)
-cargo run --bin envd server.yml
+envd server.yml
 
 # configure the client
 enve project add myapp ~/Dev/myapp/
