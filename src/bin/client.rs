@@ -56,7 +56,7 @@ fn resolve_project(projects: &HashMap<String, String>) -> anyhow::Result<String>
     }
 
     best.map(|(_, name)| name)
-        .context("no project matched current directory — use --project or run `env project add`")
+        .context("no project matched current directory — use --project or run `enve project add`")
 }
 
 fn get_project(explicit: Option<String>, cfg: &ClientConfig) -> anyhow::Result<String> {
