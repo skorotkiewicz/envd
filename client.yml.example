@@ -3,5 +3,5 @@ config:
   token:    secret_token
 
 projects:
-  myapp:   ~/Dev/myapp/
-  backend: ~/Dev/backend/
+  myapp:   /home/mod/Dev/myapp
+  backend: /home/mod/Dev/backend
