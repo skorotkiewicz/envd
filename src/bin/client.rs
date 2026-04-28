@@ -131,7 +131,7 @@ enum Cmd {
         project: Option<String>,
     },
 
-    /// Print shell hook (add `eval "$(env hook zsh)"` to .zshrc)
+    /// Print shell hook (add `eval "$(enve hook zsh)"` to .zshrc)
     Hook { shell: String },
 }
 
@@ -266,9 +266,25 @@ fn main() -> anyhow::Result<()> {
                     r#"
 # envd shell hook
 _envd_hook() {{
+  local new_env
+  new_env=$(enve get 2>/dev/null)
+
+  # Unset previously set variables
+  if [[ -n "${{_ENVD_KEYS:-}}" ]]; then
+    for key in ${{_ENVD_KEYS}}; do
+      unset "$key"
+    done
+  fi
+
+  _ENVD_KEYS=""
+
+  # Set new variables and track their keys
   while IFS='=' read -r key val; do
-    export "$key=$val"
-  done < <(enve get 2>/dev/null)
+    if [[ -n "$key" ]]; then
+      export "$key=$val"
+      _ENVD_KEYS="${{_ENVD_KEYS:+${{_ENVD_KEYS}} }}$key"
+    fi
+  done <<< "$new_env"
 }}
 if [[ -n "$ZSH_VERSION" ]]; then
   autoload -U add-zsh-hook
