@@ -158,9 +158,18 @@ fn main() -> anyhow::Result<()> {
 
             match action {
                 ProjectAction::Add { name, path } => {
-                    projects.insert(name.clone(), path.clone());
+                    let expanded = shellexpand::tilde(&path).to_string();
+                    let abs = PathBuf::from(&expanded);
+                    let abs = if abs.is_relative() {
+                        env::current_dir()?.join(abs)
+                    } else {
+                        abs
+                    };
+                    let abs = abs.canonicalize().unwrap_or(abs);
+                    let abs = abs.to_string_lossy().to_string();
+                    projects.insert(name.clone(), abs.clone());
                     save_config(&cfg)?;
-                    println!("✓ project '{name}' -> {path}");
+                    println!("✓ project '{name}' -> {abs}");
                 }
                 ProjectAction::List => {
                     if projects.is_empty() {

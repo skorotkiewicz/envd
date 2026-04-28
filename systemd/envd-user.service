@@ -1,0 +1,12 @@
+[Unit]
+Description=Environment Variable Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/envd %h/.config/envd/server.yml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
