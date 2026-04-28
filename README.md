@@ -99,10 +99,10 @@ Pick one in `server.yml`:
 
 ## Shell completions (optional)
 
-Add to `~/.bashrc` / `~/.zshrc` / `~/.config/fish/config.fish`:
+Add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-eval "$(enve complete bash)"   # or: zsh, fish | source
+eval "$(enve complete zsh)"   # or: zsh, fish | source
 ```
 
 ## Commands

@@ -134,7 +134,7 @@ enum Cmd {
     /// Print shell hook (add `eval "$(enve hook zsh)"` to .zshrc)
     Hook { shell: String },
 
-    /// Generate shell completion script (bash, zsh, fish, elvish, powershell)
+    /// Generate shell completion (add `eval "$(enve complete zsh)"` to .zshrc)
     Complete { shell: clap_complete::Shell },
 }
 
