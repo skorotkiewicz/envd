@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get},
@@ -37,6 +37,19 @@ fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
     Ok(serde_yaml::from_str(&text)?)
 }
 
+// -- Vault query param
+
+#[derive(Deserialize, Default)]
+struct VaultQuery {
+    vault: Option<String>,
+}
+
+impl VaultQuery {
+    fn vault(&self) -> &str {
+        self.vault.as_deref().unwrap_or("0")
+    }
+}
+
 // -- Backend
 
 #[derive(Clone)]
@@ -63,7 +76,7 @@ impl Db {
                     anyhow::anyhow!("backend is 'postgres' but no 'postgres:' URL configured")
                 })?;
                 let pool = sqlx::PgPool::connect(url).await?;
-                Self::migrate_pg(&pool).await?;
+                sqlx::migrate!("./migrations/pg").run(&pool).await?;
                 println!("✓ postgres connected");
                 Ok(Db::Postgres(pool))
             }
@@ -71,7 +84,6 @@ impl Db {
                 let path = storage.sqlite.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("backend is 'sqlite' but no 'sqlite:' path configured")
                 })?;
-                // sqlx sqlite needs the file to exist; create it if missing
                 let file_path = path
                     .strip_prefix("sqlite://")
                     .or_else(|| path.strip_prefix("sqlite:"))
@@ -79,8 +91,15 @@ impl Db {
                 if !std::path::Path::new(file_path).exists() {
                     std::fs::File::create(file_path)?;
                 }
-                let pool = sqlx::SqlitePool::connect(path).await?;
-                Self::migrate_sqlite(&pool).await?;
+                // Ensure foreign keys are enforced on every connection
+                let connect_url = path.to_string();
+                // if connect_url.contains('?') {
+                //     connect_url.push_str("&foreign_keys=1");
+                // } else {
+                //     connect_url.push_str("?foreign_keys=1");
+                // }
+                let pool = sqlx::SqlitePool::connect(&connect_url).await?;
+                sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
                 println!("✓ sqlite connected ({file_path})");
                 Ok(Db::Sqlite(pool))
             }
@@ -108,15 +127,45 @@ impl Db {
     async fn v_delete_project(&mut self, name: &str) -> anyhow::Result<()> {
         let Db::Valkey(c) = self else { unreachable!() };
         use redis::AsyncCommands;
+        let vaults: Vec<String> = c
+            .smembers(format!("envd:vaults:{name}"))
+            .await
+            .unwrap_or_default();
+        for vault in &vaults {
+            let _: i64 = c.del(format!("envd:envs:{name}:{vault}")).await?;
+        }
+        let _: i64 = c.del(format!("envd:vaults:{name}")).await?;
         let _: i64 = c.srem("envd:projects", name).await?;
-        let _: i64 = c.del(format!("envd:envs:{name}")).await?;
         Ok(())
     }
 
-    async fn v_get_envs(&mut self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+    async fn v_list_vaults(&mut self, name: &str) -> anyhow::Result<Vec<String>> {
         let Db::Valkey(c) = self else { unreachable!() };
         use redis::AsyncCommands;
-        Ok(c.hgetall(format!("envd:envs:{name}"))
+        let mut vaults: Vec<String> = c
+            .smembers(format!("envd:vaults:{name}"))
+            .await
+            .unwrap_or_default();
+        vaults.sort();
+        Ok(vaults)
+    }
+
+    async fn v_delete_vault(&mut self, name: &str, vault: &str) -> anyhow::Result<()> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        let _: i64 = c.del(format!("envd:envs:{name}:{vault}")).await?;
+        let _: i64 = c.srem(format!("envd:vaults:{name}"), vault).await?;
+        Ok(())
+    }
+
+    async fn v_get_envs(
+        &mut self,
+        name: &str,
+        vault: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Valkey(c) = self else { unreachable!() };
+        use redis::AsyncCommands;
+        Ok(c.hgetall(format!("envd:envs:{name}:{vault}"))
             .await
             .unwrap_or_default())
     }
@@ -124,51 +173,27 @@ impl Db {
     async fn v_set_envs(
         &mut self,
         name: &str,
+        vault: &str,
         envs: &HashMap<String, String>,
     ) -> anyhow::Result<()> {
         let Db::Valkey(c) = self else { unreachable!() };
         use redis::AsyncCommands;
         let _: i64 = c.sadd("envd:projects", name).await?;
+        let _: i64 = c.sadd(format!("envd:vaults:{name}"), vault).await?;
         for (k, v) in envs {
-            let _: i64 = c.hset(format!("envd:envs:{name}"), k, v).await?;
+            let _: i64 = c.hset(format!("envd:envs:{name}:{vault}"), k, v).await?;
         }
         Ok(())
     }
 
-    async fn v_delete_env(&mut self, name: &str, key: &str) -> anyhow::Result<()> {
+    async fn v_delete_env(&mut self, name: &str, vault: &str, key: &str) -> anyhow::Result<()> {
         let Db::Valkey(c) = self else { unreachable!() };
         use redis::AsyncCommands;
-        let _: i64 = c.hdel(format!("envd:envs:{name}"), key).await?;
+        let _: i64 = c.hdel(format!("envd:envs:{name}:{vault}"), key).await?;
         Ok(())
     }
 
     // -- Postgres helpers --
-
-    async fn migrate_pg(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS projects (
-                id      SERIAL PRIMARY KEY,
-                name    TEXT UNIQUE NOT NULL,
-                created TIMESTAMPTZ DEFAULT now()
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS envs (
-                id      SERIAL PRIMARY KEY,
-                project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-                key     TEXT NOT NULL,
-                value   TEXT NOT NULL,
-                updated TIMESTAMPTZ DEFAULT now(),
-                UNIQUE(project, key)
-            )",
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
 
     async fn pg_projects(&self) -> anyhow::Result<Vec<String>> {
         let Db::Postgres(pool) = self else {
@@ -208,19 +233,55 @@ impl Db {
         Ok(())
     }
 
-    async fn pg_get_envs(&self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+    async fn pg_list_vaults(&self, name: &str) -> anyhow::Result<Vec<String>> {
         let Db::Postgres(pool) = self else {
             unreachable!()
         };
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key, value FROM envs WHERE project = $1 ORDER BY key")
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT vault FROM envs WHERE project = $1 ORDER BY vault")
                 .bind(name)
                 .fetch_all(pool)
                 .await?;
+        Ok(rows)
+    }
+
+    async fn pg_delete_vault(&self, name: &str, vault: &str) -> anyhow::Result<()> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND vault = $2")
+            .bind(name)
+            .bind(vault)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    async fn pg_get_envs(
+        &self,
+        name: &str,
+        vault: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Postgres(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM envs WHERE project = $1 AND vault = $2 ORDER BY key",
+        )
+        .bind(name)
+        .bind(vault)
+        .fetch_all(pool)
+        .await?;
         Ok(rows.into_iter().collect())
     }
 
-    async fn pg_set_envs(&self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+    async fn pg_set_envs(
+        &self,
+        name: &str,
+        vault: &str,
+        envs: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
         let Db::Postgres(pool) = self else {
             unreachable!()
         };
@@ -231,10 +292,11 @@ impl Db {
             .ok();
         for (k, v) in envs {
             sqlx::query(
-                "INSERT INTO envs (project, key, value) VALUES ($1,$2,$3)
-                 ON CONFLICT (project, key) DO UPDATE SET value = $3, updated = now()",
+                "INSERT INTO envs (project, vault, key, value) VALUES ($1,$2,$3,$4)
+                 ON CONFLICT (project, vault, key) DO UPDATE SET value = $4, updated = now()",
             )
             .bind(name)
+            .bind(vault)
             .bind(k)
             .bind(v)
             .execute(pool)
@@ -243,12 +305,13 @@ impl Db {
         Ok(())
     }
 
-    async fn pg_delete_env(&self, name: &str, key: &str) -> anyhow::Result<()> {
+    async fn pg_delete_env(&self, name: &str, vault: &str, key: &str) -> anyhow::Result<()> {
         let Db::Postgres(pool) = self else {
             unreachable!()
         };
-        sqlx::query("DELETE FROM envs WHERE project = $1 AND key = $2")
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND vault = $2 AND key = $3")
             .bind(name)
+            .bind(vault)
             .bind(key)
             .execute(pool)
             .await
@@ -257,37 +320,6 @@ impl Db {
     }
 
     // -- SQLite helpers --
-
-    async fn migrate_sqlite(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS projects (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                name    TEXT UNIQUE NOT NULL,
-                created TEXT DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS envs (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-                key     TEXT NOT NULL,
-                value   TEXT NOT NULL,
-                updated TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(project, key)
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        // enable foreign keys
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
 
     async fn sq_projects(&self) -> anyhow::Result<Vec<String>> {
         let Db::Sqlite(pool) = self else {
@@ -327,19 +359,55 @@ impl Db {
         Ok(())
     }
 
-    async fn sq_get_envs(&self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+    async fn sq_list_vaults(&self, name: &str) -> anyhow::Result<Vec<String>> {
         let Db::Sqlite(pool) = self else {
             unreachable!()
         };
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key, value FROM envs WHERE project = $1 ORDER BY key")
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT vault FROM envs WHERE project = $1 ORDER BY vault")
                 .bind(name)
                 .fetch_all(pool)
                 .await?;
+        Ok(rows)
+    }
+
+    async fn sq_delete_vault(&self, name: &str, vault: &str) -> anyhow::Result<()> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND vault = $2")
+            .bind(name)
+            .bind(vault)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(())
+    }
+
+    async fn sq_get_envs(
+        &self,
+        name: &str,
+        vault: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let Db::Sqlite(pool) = self else {
+            unreachable!()
+        };
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM envs WHERE project = $1 AND vault = $2 ORDER BY key",
+        )
+        .bind(name)
+        .bind(vault)
+        .fetch_all(pool)
+        .await?;
         Ok(rows.into_iter().collect())
     }
 
-    async fn sq_set_envs(&self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+    async fn sq_set_envs(
+        &self,
+        name: &str,
+        vault: &str,
+        envs: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
         let Db::Sqlite(pool) = self else {
             unreachable!()
         };
@@ -350,10 +418,11 @@ impl Db {
             .ok();
         for (k, v) in envs {
             sqlx::query(
-                "INSERT INTO envs (project, key, value) VALUES ($1,$2,$3)
-                 ON CONFLICT (project, key) DO UPDATE SET value = $3, updated = CURRENT_TIMESTAMP",
+                "INSERT INTO envs (project, vault, key, value) VALUES ($1,$2,$3,$4)
+                 ON CONFLICT (project, vault, key) DO UPDATE SET value = $4, updated = CURRENT_TIMESTAMP",
             )
             .bind(name)
+            .bind(vault)
             .bind(k)
             .bind(v)
             .execute(pool)
@@ -362,12 +431,13 @@ impl Db {
         Ok(())
     }
 
-    async fn sq_delete_env(&self, name: &str, key: &str) -> anyhow::Result<()> {
+    async fn sq_delete_env(&self, name: &str, vault: &str, key: &str) -> anyhow::Result<()> {
         let Db::Sqlite(pool) = self else {
             unreachable!()
         };
-        sqlx::query("DELETE FROM envs WHERE project = $1 AND key = $2")
+        sqlx::query("DELETE FROM envs WHERE project = $1 AND vault = $2 AND key = $3")
             .bind(name)
+            .bind(vault)
             .bind(key)
             .execute(pool)
             .await
@@ -401,27 +471,52 @@ impl Db {
         }
     }
 
-    async fn get_envs(&mut self, name: &str) -> anyhow::Result<HashMap<String, String>> {
+    async fn list_vaults(&mut self, name: &str) -> anyhow::Result<Vec<String>> {
         match self {
-            Db::Valkey(..) => self.v_get_envs(name).await,
-            Db::Postgres(..) => self.pg_get_envs(name).await,
-            Db::Sqlite(..) => self.sq_get_envs(name).await,
+            Db::Valkey(..) => self.v_list_vaults(name).await,
+            Db::Postgres(..) => self.pg_list_vaults(name).await,
+            Db::Sqlite(..) => self.sq_list_vaults(name).await,
         }
     }
 
-    async fn set_envs(&mut self, name: &str, envs: &HashMap<String, String>) -> anyhow::Result<()> {
+    async fn delete_vault(&mut self, name: &str, vault: &str) -> anyhow::Result<()> {
         match self {
-            Db::Valkey(..) => self.v_set_envs(name, envs).await,
-            Db::Postgres(..) => self.pg_set_envs(name, envs).await,
-            Db::Sqlite(..) => self.sq_set_envs(name, envs).await,
+            Db::Valkey(..) => self.v_delete_vault(name, vault).await,
+            Db::Postgres(..) => self.pg_delete_vault(name, vault).await,
+            Db::Sqlite(..) => self.sq_delete_vault(name, vault).await,
         }
     }
 
-    async fn delete_env(&mut self, name: &str, key: &str) -> anyhow::Result<()> {
+    async fn get_envs(
+        &mut self,
+        name: &str,
+        vault: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
         match self {
-            Db::Valkey(..) => self.v_delete_env(name, key).await,
-            Db::Postgres(..) => self.pg_delete_env(name, key).await,
-            Db::Sqlite(..) => self.sq_delete_env(name, key).await,
+            Db::Valkey(..) => self.v_get_envs(name, vault).await,
+            Db::Postgres(..) => self.pg_get_envs(name, vault).await,
+            Db::Sqlite(..) => self.sq_get_envs(name, vault).await,
+        }
+    }
+
+    async fn set_envs(
+        &mut self,
+        name: &str,
+        vault: &str,
+        envs: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_set_envs(name, vault, envs).await,
+            Db::Postgres(..) => self.pg_set_envs(name, vault, envs).await,
+            Db::Sqlite(..) => self.sq_set_envs(name, vault, envs).await,
+        }
+    }
+
+    async fn delete_env(&mut self, name: &str, vault: &str, key: &str) -> anyhow::Result<()> {
+        match self {
+            Db::Valkey(..) => self.v_delete_env(name, vault, key).await,
+            Db::Postgres(..) => self.pg_delete_env(name, vault, key).await,
+            Db::Sqlite(..) => self.sq_delete_env(name, vault, key).await,
         }
     }
 }
@@ -498,14 +593,39 @@ async fn delete_project(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// GET /projects/{name}/envs  -> YAML
-async fn get_envs(
+/// GET /projects/{name}/vaults
+async fn list_vaults(
     State(mut s): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Response {
     require_auth!(s, headers);
-    match s.db.get_envs(&name).await {
+    match s.db.list_vaults(&name).await {
+        Ok(vaults) => Json(vaults).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// DELETE /projects/{name}/vaults/{vault}
+async fn delete_vault(
+    State(mut s): State<AppState>,
+    headers: HeaderMap,
+    Path((name, vault)): Path<(String, String)>,
+) -> Response {
+    require_auth!(s, headers);
+    s.db.delete_vault(&name, &vault).await.ok();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// GET /projects/{name}/envs?vault=0  -> YAML
+async fn get_envs(
+    State(mut s): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(vq): Query<VaultQuery>,
+) -> Response {
+    require_auth!(s, headers);
+    match s.db.get_envs(&name, vq.vault()).await {
         Ok(envs) => {
             let yaml = serde_yaml::to_string(&envs).unwrap_or_default();
             (StatusCode::OK, [("content-type", "application/yaml")], yaml).into_response()
@@ -514,28 +634,30 @@ async fn get_envs(
     }
 }
 
-/// POST /projects/{name}/envs  body: { "envs": { "KEY": "val", ... } }
+/// POST /projects/{name}/envs?vault=0  body: { "envs": { "KEY": "val", ... } }
 async fn set_envs(
     State(mut s): State<AppState>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    Query(vq): Query<VaultQuery>,
     Json(body): Json<SetEnvsBody>,
 ) -> Response {
     require_auth!(s, headers);
-    match s.db.set_envs(&name, &body.envs).await {
+    match s.db.set_envs(&name, vq.vault(), &body.envs).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-/// DELETE /projects/{name}/envs/{key}
+/// DELETE /projects/{name}/envs/{key}?vault=0
 async fn delete_env(
     State(mut s): State<AppState>,
     headers: HeaderMap,
     Path((name, key)): Path<(String, String)>,
+    Query(vq): Query<VaultQuery>,
 ) -> Response {
     require_auth!(s, headers);
-    s.db.delete_env(&name, &key).await.ok();
+    s.db.delete_env(&name, vq.vault(), &key).await.ok();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -572,6 +694,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{name}", delete(delete_project))
+        .route("/projects/{name}/vaults", get(list_vaults))
+        .route("/projects/{name}/vaults/{vault}", delete(delete_vault))
         .route("/projects/{name}/envs", get(get_envs).post(set_envs))
         .route("/projects/{name}/envs/{key}", delete(delete_env))
         .with_state(state);

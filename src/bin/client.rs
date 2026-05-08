@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 struct ClientConfig {
     config: Config,
     projects: Option<HashMap<String, String>>, // name -> local path
+    vaults: Option<HashMap<String, String>>,   // project name -> active vault ID
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -67,6 +68,19 @@ fn get_project(explicit: Option<String>, cfg: &ClientConfig) -> anyhow::Result<S
     resolve_project(&projects)
 }
 
+// -- Vault resolution
+
+fn get_vault(explicit: Option<String>, project: &str, cfg: &ClientConfig) -> String {
+    if let Some(v) = explicit {
+        return v;
+    }
+    cfg.vaults
+        .as_ref()
+        .and_then(|m| m.get(project))
+        .cloned()
+        .unwrap_or_else(|| "0".to_string())
+}
+
 // -- HTTP helpers
 
 fn client(cfg: &Config) -> reqwest::blocking::Client {
@@ -97,6 +111,15 @@ enum Cmd {
         action: ProjectAction,
     },
 
+    /// Manage vaults within a project
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
+
+        #[arg(long, short)]
+        project: Option<String>,
+    },
+
     /// Set one or more envs: KEY=val KEY2=val2
     Set {
         #[arg(value_name = "KEY=val", required = true)]
@@ -104,6 +127,10 @@ enum Cmd {
 
         #[arg(long, short)]
         project: Option<String>,
+
+        /// Vault ID (default: active vault or "0")
+        #[arg(long)]
+        vault: Option<String>,
     },
 
     /// Get all envs (or a single key)
@@ -112,6 +139,10 @@ enum Cmd {
 
         #[arg(long, short)]
         project: Option<String>,
+
+        /// Vault ID (default: active vault or "0")
+        #[arg(long)]
+        vault: Option<String>,
     },
 
     /// Delete an env key
@@ -120,6 +151,10 @@ enum Cmd {
 
         #[arg(long, short)]
         project: Option<String>,
+
+        /// Vault ID (default: active vault or "0")
+        #[arg(long)]
+        vault: Option<String>,
     },
 
     /// Run a command with envs injected
@@ -129,6 +164,10 @@ enum Cmd {
 
         #[arg(long, short)]
         project: Option<String>,
+
+        /// Vault ID (default: active vault or "0")
+        #[arg(long)]
+        vault: Option<String>,
     },
 
     /// Print shell hook (add `eval "$(enve hook zsh)"` to .zshrc)
@@ -146,6 +185,27 @@ enum ProjectAction {
     List,
     /// Remove a project locally
     Rm { name: String },
+}
+
+#[derive(Subcommand)]
+enum VaultAction {
+    /// Switch active vault for a project (saved in config)
+    Switch {
+        /// Vault ID to switch to
+        id: String,
+    },
+    /// List vaults for a project
+    List,
+    /// Get envs from a specific vault
+    Get {
+        /// Vault ID to get envs from
+        id: String,
+    },
+    /// Remove a vault and all its envs
+    Rm {
+        /// Vault ID to remove
+        id: String,
+    },
 }
 
 // -- Main
@@ -179,22 +239,103 @@ fn main() -> anyhow::Result<()> {
                         println!("no projects registered");
                     } else {
                         for (name, path) in projects {
-                            println!("  {name:20} {path}");
+                            let active_vault = cfg
+                                .vaults
+                                .as_ref()
+                                .and_then(|v| v.get(name.as_str()))
+                                .cloned()
+                                .unwrap_or_else(|| "0".to_string());
+                            println!("  {name:20} {path}  vault:{active_vault}");
                         }
                     }
                 }
                 ProjectAction::Rm { name } => {
                     projects.remove(&name);
+                    if let Some(v) = cfg.vaults.as_mut() {
+                        v.remove(&name);
+                    }
                     save_config(&cfg)?;
                     println!("✓ removed '{name}'");
                 }
             }
         }
 
+        // -- vault management
+        Cmd::Vault { action, project } => {
+            let mut cfg = load_config()?;
+            let proj = get_project(project, &cfg)?;
+
+            match action {
+                VaultAction::Switch { id } => {
+                    let vaults = cfg.vaults.get_or_insert_with(HashMap::new);
+                    vaults.insert(proj.clone(), id.clone());
+                    save_config(&cfg)?;
+                    println!("✓ switched to vault '{id}' for '{proj}'");
+                }
+
+                VaultAction::List => {
+                    let url = format!("{}/projects/{}/vaults", cfg.config.endpoint, proj);
+                    let res = client(&cfg.config).get(&url).send()?;
+                    if !res.status().is_success() {
+                        anyhow::bail!("server error: {}", res.status());
+                    }
+                    let vault_ids: Vec<String> = res.json()?;
+                    if vault_ids.is_empty() {
+                        println!("no vaults for '{proj}'");
+                    } else {
+                        let active = get_vault(None, &proj, &cfg);
+                        for vid in &vault_ids {
+                            if vid == &active {
+                                println!("  {vid} *");
+                            } else {
+                                println!("  {vid}");
+                            }
+                        }
+                    }
+                }
+
+                VaultAction::Get { id } => {
+                    let url = format!(
+                        "{}/projects/{}/envs?vault={}",
+                        cfg.config.endpoint, proj, id
+                    );
+                    let body = client(&cfg.config).get(&url).send()?.text()?;
+                    let envs: HashMap<String, String> = serde_yaml::from_str(&body)?;
+                    if envs.is_empty() {
+                        println!("vault '{id}' is empty");
+                    } else {
+                        for (k, v) in &envs {
+                            println!("{k}={v}");
+                        }
+                    }
+                }
+
+                VaultAction::Rm { id } => {
+                    let url = format!("{}/projects/{}/vaults/{}", cfg.config.endpoint, proj, id);
+                    client(&cfg.config).delete(&url).send()?;
+
+                    // If the deleted vault was active, reset to "0"
+                    if let Some(v) = cfg.vaults.as_mut()
+                        && v.get(&proj).is_some_and(|active| active == &id)
+                    {
+                        v.insert(proj.clone(), "0".to_string());
+                        save_config(&cfg)?;
+                    }
+
+                    println!("✓ removed vault '{id}' from '{proj}'");
+                }
+            }
+        }
+
         // -- set
-        Cmd::Set { pairs, project } => {
+        Cmd::Set {
+            pairs,
+            project,
+            vault,
+        } => {
             let cfg = load_config()?;
             let proj = get_project(project, &cfg)?;
+            let vault = get_vault(vault, &proj, &cfg);
 
             let mut envs: HashMap<String, String> = HashMap::new();
             for pair in pairs {
@@ -204,32 +345,43 @@ fn main() -> anyhow::Result<()> {
                 envs.insert(k.to_string(), v.to_string());
             }
 
-            let url = format!("{}/projects/{}/envs", cfg.config.endpoint, proj);
+            let url = format!(
+                "{}/projects/{}/envs?vault={}",
+                cfg.config.endpoint, proj, vault
+            );
             let res = client(&cfg.config)
                 .post(&url)
                 .json(&serde_json::json!({ "envs": envs }))
                 .send()?;
 
             if res.status().is_success() {
-                println!("✓ saved {} env(s) to '{proj}'", envs.len());
+                println!("✓ saved {} env(s) to '{proj}' vault:{vault}", envs.len());
             } else {
                 anyhow::bail!("server error: {}", res.status());
             }
         }
 
         // -- get
-        Cmd::Get { key, project } => {
+        Cmd::Get {
+            key,
+            project,
+            vault,
+        } => {
             let cfg = load_config()?;
             let proj = get_project(project, &cfg)?;
+            let vault = get_vault(vault, &proj, &cfg);
 
-            let url = format!("{}/projects/{}/envs", cfg.config.endpoint, proj);
+            let url = format!(
+                "{}/projects/{}/envs?vault={}",
+                cfg.config.endpoint, proj, vault
+            );
             let body = client(&cfg.config).get(&url).send()?.text()?;
             let envs: HashMap<String, String> = serde_yaml::from_str(&body)?;
 
             if let Some(k) = key {
                 match envs.get(&k) {
                     Some(v) => println!("{v}"),
-                    None => anyhow::bail!("key '{k}' not found in '{proj}'"),
+                    None => anyhow::bail!("key '{k}' not found in '{proj}' vault:{vault}"),
                 }
             } else {
                 for (k, v) in &envs {
@@ -239,21 +391,37 @@ fn main() -> anyhow::Result<()> {
         }
 
         // -- rm
-        Cmd::Rm { key, project } => {
+        Cmd::Rm {
+            key,
+            project,
+            vault,
+        } => {
             let cfg = load_config()?;
             let proj = get_project(project, &cfg)?;
+            let vault = get_vault(vault, &proj, &cfg);
 
-            let url = format!("{}/projects/{}/envs/{}", cfg.config.endpoint, proj, key);
+            let url = format!(
+                "{}/projects/{}/envs/{}?vault={}",
+                cfg.config.endpoint, proj, key, vault
+            );
             client(&cfg.config).delete(&url).send()?;
-            println!("✓ deleted '{key}' from '{proj}'");
+            println!("✓ deleted '{key}' from '{proj}' vault:{vault}");
         }
 
         // -- run
-        Cmd::Run { cmd, project } => {
+        Cmd::Run {
+            cmd,
+            project,
+            vault,
+        } => {
             let cfg = load_config()?;
             let proj = get_project(project, &cfg)?;
+            let vault = get_vault(vault, &proj, &cfg);
 
-            let url = format!("{}/projects/{}/envs", cfg.config.endpoint, proj);
+            let url = format!(
+                "{}/projects/{}/envs?vault={}",
+                cfg.config.endpoint, proj, vault
+            );
             let body = client(&cfg.config).get(&url).send()?.text()?;
             let envs: HashMap<String, String> = serde_yaml::from_str(&body)?;
 
